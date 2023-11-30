@@ -653,14 +653,15 @@ func process_changelog(mdtname string, userid string) {
 		lastidx = rec.Index()
 		rectype := rec.Type()
 
-		slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
-
 		switch {
 		case rectype == "MKDIR":
+			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			mkdir(rec)
 		case rectype == "RMDIR":
+			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			rmdir(rec)
 		case rectype == "RENME":
+			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			if usingHns == true {
 				err := renme_adls(rec)
 				if err != nil {
@@ -673,14 +674,18 @@ func process_changelog(mdtname string, userid string) {
 		//case rectype == "XATTR":
 		//	update_metadata(rec)
 		case rectype == "SATTR":
+			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			update_metadata(rec)
 		//case rectype == "LYOUT":
 		//	update_layout(rec)
 		case rectype == "SLINK":
+			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			slink(rec)
 		case rectype == "UNLNK":
+			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			unlnk(rec)
 		default:
+			slog.Debug("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 		}
 
 		if lastidx%1000 == 0 {
@@ -695,6 +700,7 @@ func process_changelog(mdtname string, userid string) {
 func main() {
 	var accountName, accountSuffix string
 	var mdtname, userid string
+	var debug bool
 
 	flag.StringVar(&accountName, "account", "", "Azure storage account name [required]")
 	flag.StringVar(&accountSuffix, "suffix", "blob.core.windows.net", "Azure storage account suffix")
@@ -705,8 +711,17 @@ func main() {
 	flag.BoolVar(&usingHns, "hns", false, "Use hierarchical namespace")
 	flag.UintVar(&archiveId, "archiveid", 1, "The archive ID to use")
 	flag.BoolVar(&autoRemove, "autoremove", false, "Automatically remove files from archive")
+	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 
 	flag.Parse()
+
+	if debug {
+		opts := &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		}
+		logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
+		slog.SetDefault(logger)
+	}
 
 	if len(accountName) == 0 {
 		slog.Error("missing required account argument")
