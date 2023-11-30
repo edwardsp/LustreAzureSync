@@ -35,6 +35,7 @@ var cred *azidentity.DefaultAzureCredential
 var client *azblob.Client
 var serviceUrl string
 var usingHns bool
+var autoRemove bool
 
 type lfsent struct {
 	name   string
@@ -179,8 +180,24 @@ func unlnk(rec *llapi.ChangelogRecord) {
 
 		delete(symlinkLookup, rec.TargetFid().String())
 
-		slog.Info("unlnk", "idx", rec.Index(), "type", rec.Type(), "targetfid", rec.TargetFid(), "tname", tname, "rec.Name()", rec.Name())
+		slog.Info("unlnk symlink", "idx", rec.TargetFid(), "tname", tname)
 		delete_blob(tname)
+	} else {
+		if autoRemove == true {
+			tname, err := getPath(rec.Name(), rec.ParentFid().String())
+			if err != nil {
+				slog.Warn("Failed to get path", "error", err)
+				return
+			}
+
+			if tname == "" {
+				slog.Warn("Cannot unlink", "name", rec.Name())
+				return
+			}
+
+			slog.Info("unlnk file", "targetfid", rec.TargetFid(), "tname", tname)
+			delete_blob(tname)
+		}
 	}
 }
 
@@ -657,8 +674,8 @@ func process_changelog(mdtname string, userid string) {
 		//	update_metadata(rec)
 		case rectype == "SATTR":
 			update_metadata(rec)
-		case rectype == "LYOUT":
-			update_layout(rec)
+		//case rectype == "LYOUT":
+		//	update_layout(rec)
 		case rectype == "SLINK":
 			slink(rec)
 		case rectype == "UNLNK":
@@ -687,6 +704,7 @@ func main() {
 	flag.StringVar(&mountRoot, "mountroot", "/lustre", "The lustre mount root")
 	flag.BoolVar(&usingHns, "hns", false, "Use hierarchical namespace")
 	flag.UintVar(&archiveId, "archiveid", 1, "The archive ID to use")
+	flag.BoolVar(&autoRemove, "autoremove", false, "Automatically remove files from archive")
 
 	flag.Parse()
 
@@ -729,6 +747,13 @@ func main() {
 		os.Exit(1)
 	}
 	rootFid = rf.String()
+
+	if usingHns {
+		slog.Info("Feature enabled: Hierarchical Namespace")
+	}
+	if autoRemove {
+		slog.Info("Feature enabled: Auto Remove")
+	}
 
 	slog.Info("Initialising")
 	dirLookup, symlinkLookup = walk_filesystem(mountRoot)
