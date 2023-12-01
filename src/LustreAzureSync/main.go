@@ -658,16 +658,16 @@ func process_changelog(mdtname string, userid string) {
 		}
 
 		lastidx = rec.Index()
-		rectype := rec.Type()
+		rectypeid := rec.TypeCode()
 
 		switch {
-		case rectype == "MKDIR":
+		case rectypeid == llapi.OpMkdir:
 			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			mkdir(rec)
-		case rectype == "RMDIR":
+		case rectypeid == llapi.OpRmdir:
 			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			rmdir(rec)
-		case rectype == "RENME":
+		case rectypeid == llapi.OpRename:
 			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			if usingHns == true {
 				err := renme_adls(rec)
@@ -678,17 +678,13 @@ func process_changelog(mdtname string, userid string) {
 			} else {
 				renme(rec)
 			}
-		//case rectype == "XATTR":
-		//	update_metadata(rec)
-		case rectype == "SATTR":
+		case rectypeid == llapi.OpSetattr:
 			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			update_metadata(rec)
-		//case rectype == "LYOUT":
-		//	update_layout(rec)
-		case rectype == "SLINK":
+		case rectypeid == llapi.OpSoftlink:
 			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			slink(rec)
-		case rectype == "UNLNK":
+		case rectypeid == llapi.OpUnlink:
 			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			unlnk(rec)
 		default:
