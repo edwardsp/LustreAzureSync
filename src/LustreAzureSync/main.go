@@ -139,6 +139,13 @@ func set_metadata(name string) {
 		slog.Warn("Failed to get metadata for file", "name", name, "error", err)
 		return
 	} else {
+		if usingHns == true {
+			// delete hdi_isfolder from meta if it exists
+			if _, ok := meta["hdi_isfolder"]; ok {
+				delete(meta, "hdi_isfolder")
+			}
+		}
+
 		blobUrl := fmt.Sprintf("%s/%s/%s", serviceUrl, containerName, name)
 		blobClient, err := blob.NewClient(blobUrl, cred, nil)
 		if err != nil {
@@ -254,7 +261,7 @@ func rmdir(rec *llapi.ChangelogRecord) {
 	}
 
 	delete(dirLookup, rec.TargetFid().String())
-	slog.Warn("rmdir", "idx", rec.Index(), "type", rec.Type(), "targetfid", rec.TargetFid(), "tname", tname, "rec.SourceName()", rec.SourceName(), "rec.Name()", rec.Name(), "rec.JobID", rec.JobID())
+	slog.Info("rmdir", "idx", rec.Index(), "type", rec.Type(), "targetfid", rec.TargetFid(), "tname", tname, "rec.SourceName()", rec.SourceName(), "rec.Name()", rec.Name(), "rec.JobID", rec.JobID())
 	delete_blob(tname)
 }
 
@@ -278,7 +285,7 @@ func renme_adls(rec *llapi.ChangelogRecord) error {
 		if err != nil {
 			return errors.New("Unable to create directory client")
 		}
-		_, err = client.Rename(context.Background(), tname, nil)
+		_, err = client.Rename(ctx, tname, nil)
 		if err != nil {
 			return errors.New("Unable to rename directory")
 		}
@@ -287,7 +294,7 @@ func renme_adls(rec *llapi.ChangelogRecord) error {
 		if err != nil {
 			return errors.New("Unable to create file client")
 		}
-		_, err = client.Rename(context.Background(), tname, nil)
+		_, err = client.Rename(ctx, tname, nil)
 		if err != nil {
 			return errors.New("Unable to rename file")
 		}
@@ -521,11 +528,13 @@ func update_metadata(rec *llapi.ChangelogRecord) {
 	// if it is a directory, just update, don't try and get hsm status
 	if _, ok := dirLookup[tfid.String()]; ok {
 		set_metadata(target_name)
+		return
 	}
 
 	// if it is a symlink, just update, don't try and get hsm status
 	if _, ok := symlinkLookup[tfid.String()]; ok {
 		set_metadata(target_name)
+		return
 	}
 
 	// rec is a file, so we need to get the hsm status and only update if not dirty anyway
@@ -622,8 +631,6 @@ func process_changelog(mdtname string, userid string) {
 	}
 
 	var lastidx int64 = 0
-
-	ctx = context.Background()
 
 	for {
 		rec, err := llapi.ChangelogRecv(cl)
