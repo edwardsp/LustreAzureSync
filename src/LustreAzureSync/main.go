@@ -100,6 +100,7 @@ func get_meta(fname string) (_ map[string]*string, err error) {
 			fmt.Printf("error: failed to read the symlink target for %s", fname)
 		}
 		meta["symlink"] = to.Ptr(link_target)
+		meta["ftype"] = to.Ptr("LNK")
 	}
 
 	return meta, nil
@@ -121,7 +122,7 @@ func create_symlink(name string) {
 	} else {
 		// only create in blob storage if it is a symlink on the filesystem
 		if _, ok := meta["symlink"]; ok {
-			_, err = client.UploadBuffer(ctx, containerName, name, nil, &azblob.UploadBufferOptions{
+			_, err = client.UploadBuffer(ctx, containerName, name, []byte(*meta["symlink"]), &azblob.UploadBufferOptions{
 				Metadata: meta,
 			})
 			if err != nil {
