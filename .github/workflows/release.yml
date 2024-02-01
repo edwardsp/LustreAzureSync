@@ -13,50 +13,12 @@ on:
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  ubuntu2004-LustreAzureSync:
+  LustreAzureSync:
     # The type of runner that the job will run on
     runs-on: ubuntu-latest
 
     container:
-      image: paulmedwards/lfsazsync-lemur-ubuntu2004:latest
-      options: --user 0
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: get repo dir
-        run: echo "repo_dir=$(pwd)" >> $GITHUB_ENV
-
-      - name: fix git detected dubious ownership in repository
-        run: git config --global --add safe.directory ${{ env.repo_dir }}
-
-      - name: get version tag
-        run: echo "version_tag=$(git describe --tags --always --dirty | tr '-' '_')" >> $GITHUB_ENV
-
-      - name: print release name
-        run: echo "version tag = ${{ env.version_tag }}"
-
-      - name: build
-        run: |
-          export GOPATH=/go
-          ./build.sh
-      
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        with:
-          name: ${{ env.version_tag }}
-          files: |
-            ${{ env.repo_dir }}/LustreAzureSync
-
-  almalinux87-LustreAzureSync:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
-
-    container:
-      image: paulmedwards/lfsazsync-lemur-almalinux87:latest
+      image: paulmedwards/lustreazuresync-builder:latest
       options: --user 0
 
     # Steps represent a sequence of tasks that will be executed as part of the job
