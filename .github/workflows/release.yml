@@ -39,6 +39,9 @@ jobs:
       - name: print release name
         run: echo "version tag = ${{ env.version_tag }}"
 
+      - name: list files
+        run: find . 
+      
       - name: build
         run: build.sh
       
