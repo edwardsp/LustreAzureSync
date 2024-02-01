@@ -42,7 +42,7 @@ jobs:
       - name: build
         run: |
           export GOPATH=/go
-          build.sh
+          ./build.sh
       
       - name: Release
         uses: softprops/action-gh-release@v1
@@ -80,7 +80,7 @@ jobs:
       - name: build
         run: |
           export GOPATH=/go
-          build.sh
+          ./build.sh
       
       - name: Release
         uses: softprops/action-gh-release@v1
