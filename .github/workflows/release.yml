@@ -39,11 +39,8 @@ jobs:
       - name: print release name
         run: echo "version tag = ${{ env.version_tag }}"
 
-      - name: list files
-        run: find . 
-      
       - name: build
-        run: build.sh
+        run: ./build.sh
       
       - name: Release
         uses: softprops/action-gh-release@v1
@@ -79,7 +76,7 @@ jobs:
         run: echo "version tag = ${{ env.version_tag }}"
 
       - name: build
-        run: build.sh
+        run: ./build.sh
       
       - name: Release
         uses: softprops/action-gh-release@v1
