@@ -5,7 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"sync"
+
+	//"log"
 	"log/slog"
+	//"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -21,8 +25,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/directory"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 
-	"github.com/edwardsp/go-lustre"
-	"github.com/edwardsp/go-lustre/llapi"
+	"github.com/edwardsp/LustreAzureSync/src/go-lustre"
+	"github.com/edwardsp/LustreAzureSync/src/go-lustre/llapi"
+	//_ "net/http/pprof"
 )
 
 var mountRoot string
@@ -36,6 +41,9 @@ var client *azblob.Client
 var serviceUrl string
 var usingHns bool
 var autoRemove bool
+var maxConcurrency int
+
+const MAX_RETRIES = 5
 
 type lfsent struct {
 	name   string
@@ -106,11 +114,32 @@ func get_meta(fname string) (_ map[string]*string, err error) {
 	return meta, nil
 }
 
+// Retry function with backoff
+func retry(fn func() error) error {
+	for i := 0; i < MAX_RETRIES; i++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if i == MAX_RETRIES-1 {
+			return err
+		}
+		backoff := time.Duration(i+1) * time.Second
+		slog.Debug("Retrying after error", "error", err, "backoff", backoff)
+		time.Sleep(backoff)
+	}
+	return nil
+}
+
+// Function to delete a blob
 func delete_blob(path string) {
 	if _, err := os.Stat(mountRoot + "/" + path); os.IsNotExist(err) {
-		_, err = client.DeleteBlob(ctx, containerName, path, nil)
+		err := retry(func() error {
+			_, err := client.DeleteBlob(ctx, containerName, path, nil)
+			return err
+		})
 		if err != nil {
-			slog.Warn("Failed to delete object", "path", path)
+			slog.Warn("Failed to delete object", "path", path, "error", err)
 		}
 	}
 }
@@ -122,11 +151,14 @@ func create_symlink(name string) {
 	} else {
 		// only create in blob storage if it is a symlink on the filesystem
 		if _, ok := meta["symlink"]; ok {
-			_, err = client.UploadBuffer(ctx, containerName, name, []byte(*meta["symlink"]), &azblob.UploadBufferOptions{
-				Metadata: meta,
+			err := retry(func() error {
+				_, err := client.UploadBuffer(ctx, containerName, name, []byte(*meta["symlink"]), &azblob.UploadBufferOptions{
+					Metadata: meta,
+				})
+				return err
 			})
 			if err != nil {
-				slog.Warn("Failed to create symlink", "name", name)
+				slog.Warn("Failed to create symlink", "name", name, "error", err)
 			}
 		} else {
 			slog.Warn("Not a symlink on the filesystem anymore, not creating", "name", name)
@@ -215,15 +247,18 @@ func create_dir(name string) {
 		slog.Warn("Failed to get metadata for directory", "name", name)
 	} else {
 		// only create in blob storage if it is a directory on the filesystem
-		if _, ok := meta["hdi_isfolder"]; ok {
-			_, err = client.UploadBuffer(ctx, containerName, name, nil, &azblob.UploadBufferOptions{
-				Metadata: meta,
+		if _, ok := meta["hdi_isfolder"]; !ok {
+			slog.Warn("Not a directory on the filesystem anymore, not creating", "name", name)
+		} else {
+			err := retry(func() error {
+				_, err := client.UploadBuffer(ctx, containerName, name, nil, &azblob.UploadBufferOptions{
+					Metadata: meta,
+				})
+				return err
 			})
 			if err != nil {
-				slog.Warn("Failed to create directory", "name", name)
+				slog.Warn("Failed to create directory", "name", name, "error", err)
 			}
-		} else {
-			slog.Warn("Not a directory on the filesystem anymore, not creating", "name", name)
 		}
 	}
 }
@@ -488,6 +523,125 @@ func renme(rec *llapi.ChangelogRecord) {
 	}
 }
 
+func renme_copyblob(rec *llapi.ChangelogRecord) {
+	tname, err := getPath(rec.Name(), rec.ParentFid().String())
+	if err != nil {
+		slog.Warn("Failed to get path", "error", err)
+		return
+	}
+	sname, err := getPath(rec.SourceName(), rec.SourceParentFid().String())
+	if err != nil {
+		slog.Warn("Failed to get path", "error", err)
+		return
+	}
+	if tname == sname {
+		slog.Warn("Source and target have the same name", "source", "sname", "target", tname)
+		return
+	}
+
+	slog.Info("Renaming", "idx", rec.Index(), "source", sname, "target", tname)
+	semaphore := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+	// walk filesystem and move files in blob storage
+	slog.Info("Walking filesystem", "path", mountRoot+"/"+tname)
+	cnt := 0
+	filepath.Walk(mountRoot+"/"+tname, func(path string, fileInfo os.FileInfo, err error) error {
+		cnt++
+		if cnt%10000 == 0 {
+			slog.Info("Walking filesystem", "count", cnt)
+		}
+		if err != nil {
+			return err
+		}
+
+		wg.Add(1)
+		semaphore <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+			targetPath := strings.TrimPrefix(path, mountRoot+"/")
+			sourcePath := strings.Replace(targetPath, tname, sname, 1)
+
+			if fileInfo.IsDir() {
+				create_dir(targetPath)
+				delete_blob(sourcePath)
+				return
+			}
+			if fileInfo.Mode()&os.ModeSymlink != 0 {
+				create_symlink(targetPath)
+				delete_blob(sourcePath)
+				return
+			}
+
+			targetBlobUrl := fmt.Sprintf("%s/%s/%s", serviceUrl, containerName, targetPath)
+			targetBlobClient, err := blob.NewClient(targetBlobUrl, cred, nil)
+			if err != nil {
+				slog.Warn("Failed to get targetBlobClient", "targetBlobUrl", targetBlobUrl, "error", err)
+			}
+
+			sourceBlobUrl := fmt.Sprintf("%s/%s/%s", serviceUrl, containerName, sourcePath)
+			sourceBlobClient, err := blob.NewClient(sourceBlobUrl, cred, nil)
+			if err != nil {
+				slog.Warn("Failed to get sourceBlobClient", "sourceBlobUrl", sourceBlobUrl, "error", err)
+			}
+
+			state, _, err := llapi.GetHsmFileStatus(path)
+			if err != nil {
+				slog.Warn("Failed to get HSM file status", "path", path, "error", err)
+				return
+			}
+			if state.HasFlag(llapi.HsmFileReleased) || state.HasFlag(llapi.HsmFileDirty) || state.HasFlag(llapi.HsmFileArchived) {
+				// copy in blob (async)
+				retry(func() error {
+					_, err = targetBlobClient.StartCopyFromURL(ctx, sourceBlobClient.URL(), nil)
+					return err
+				})
+				if err != nil {
+					slog.Warn("Failed to copy blob", "sourceBlobUrl", sourceBlobUrl, "targetBlobUrl", targetBlobUrl, "error", err)
+					return
+				}
+				// wait for copy to complete
+				for {
+					props, err := targetBlobClient.GetProperties(ctx, &blob.GetPropertiesOptions{})
+					if err != nil {
+						slog.Warn("Failed to get blob properties", "targetBlobUrl", targetBlobUrl, "error", err)
+						return
+					}
+					if *props.CopyStatus == blob.CopyStatusTypeSuccess {
+						break
+					}
+				}
+
+				delete_blob(sourcePath)
+			}
+		}() // go func
+		return nil
+	})
+	wg.Wait()
+	close(semaphore)
+	slog.Info("Move complete")
+
+	// if sfid is in dirLookup change the name (i.e. it is directory)
+	if _, ok := dirLookup[rec.SourceFid().String()]; ok {
+		sfid := rec.SourceFid()
+		ent := dirLookup[sfid.String()]
+		ent.name = rec.Name()
+		ent.parent = rec.ParentFid().String()
+		dirLookup[sfid.String()] = ent
+		//fmt.Printf("sfid=%s name=%s parent=%s\n", sfid, dirLookup[sfid.String()], dirLookup[dirLookup[sfid.String()].parent])
+	}
+
+	// if sfid is in symlinkLookup change the name (i.e. it is symlink)
+	if _, ok := symlinkLookup[rec.SourceFid().String()]; ok {
+		sfid := rec.SourceFid()
+		ent := symlinkLookup[sfid.String()]
+		ent.name = rec.Name()
+		ent.parent = rec.ParentFid().String()
+		symlinkLookup[sfid.String()] = ent
+		//fmt.Printf("sfid=%s name=%s parent=%s\n", sfid, dirLookup[sfid.String()], dirLookup[dirLookup[sfid.String()].parent])
+	}
+}
+
 // we only need to update the layout for a directory
 func update_layout(rec *llapi.ChangelogRecord) {
 	tfid := rec.TargetFid()
@@ -660,37 +814,37 @@ func process_changelog(mdtname string, userid string) {
 
 		lastidx = rec.Index()
 		rectypeid := rec.TypeCode()
-
 		switch {
 		case rectypeid == llapi.OpMkdir:
-			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
+			slog.Debug("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			mkdir(rec)
 		case rectypeid == llapi.OpRmdir:
-			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
+			slog.Debug("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			rmdir(rec)
 		case rectypeid == llapi.OpRename:
-			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
+			slog.Debug("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			if usingHns == true {
 				err := renme_adls(rec)
 				if err != nil {
 					slog.Warn("Failed to rename with adls", "error", err)
-					renme(rec)
+					renme_copyblob(rec)
 				}
 			} else {
-				renme(rec)
+				renme_copyblob(rec)
 			}
 		case rectypeid == llapi.OpSetattr:
-			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
+			slog.Debug("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			update_metadata(rec)
 		case rectypeid == llapi.OpSoftlink:
-			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
+			slog.Debug("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			slink(rec)
 		case rectypeid == llapi.OpUnlink:
-			slog.Info("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
+			slog.Debug("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 			unlnk(rec)
 		default:
 			slog.Debug("ChangelogEntry", "type", rec.Type(), "idx", rec.Index(), "type", rec.Type(), "Name", rec.Name(), "SourceName", rec.SourceName())
 		}
+		//slog.Info("Map sizes", "dirLookup", len(dirLookup), "symlinkLookup", len(symlinkLookup))
 
 		if lastidx%1000 == 0 {
 			fmt.Printf("Clearing changelog up to index %d\n", lastidx)
@@ -702,6 +856,10 @@ func process_changelog(mdtname string, userid string) {
 }
 
 func main() {
+	//go func() {
+	//	log.Println(http.ListenAndServe("localhost:6060", nil))
+	//}()
+
 	var accountName, accountSuffix string
 	var mdtname, userid string
 	var debug bool
@@ -716,6 +874,7 @@ func main() {
 	flag.UintVar(&archiveId, "archiveid", 1, "The archive ID to use")
 	flag.BoolVar(&autoRemove, "autoremove", false, "Automatically remove files from archive")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
+	flag.IntVar(&maxConcurrency, "maxconcurrency", 16, "Maximum concurrency for blob operations")
 
 	flag.Parse()
 
