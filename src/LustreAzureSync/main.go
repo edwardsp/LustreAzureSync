@@ -45,6 +45,8 @@ var maxConcurrency int
 
 const MAX_RETRIES = 5
 
+var version = "dev"
+
 type lfsent struct {
 	name   string
 	parent string
@@ -862,7 +864,7 @@ func main() {
 
 	var accountName, accountSuffix string
 	var mdtname, userid string
-	var debug bool
+	var debug, showVersion bool
 
 	flag.StringVar(&accountName, "account", "", "Azure storage account name [required]")
 	flag.StringVar(&accountSuffix, "suffix", "blob.core.windows.net", "Azure storage account suffix")
@@ -875,6 +877,7 @@ func main() {
 	flag.BoolVar(&autoRemove, "autoremove", false, "Automatically remove files from archive")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 	flag.IntVar(&maxConcurrency, "maxconcurrency", 16, "Maximum concurrency for blob operations")
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	flag.Parse()
 
@@ -884,6 +887,11 @@ func main() {
 		}
 		logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 		slog.SetDefault(logger)
+	}
+
+	if showVersion {
+		fmt.Printf("Version: %s\n", version)
+		os.Exit(0)
 	}
 
 	if len(accountName) == 0 {
