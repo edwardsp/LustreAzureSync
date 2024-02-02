@@ -42,8 +42,7 @@ var serviceUrl string
 var usingHns bool
 var autoRemove bool
 var maxConcurrency int
-
-const MAX_RETRIES = 5
+var maxRetries int
 
 var version = "dev"
 
@@ -118,12 +117,12 @@ func get_meta(fname string) (_ map[string]*string, err error) {
 
 // Retry function with backoff
 func retry(fn func() error) error {
-	for i := 0; i < MAX_RETRIES; i++ {
+	for i := 0; i < maxRetries; i++ {
 		err := fn()
 		if err == nil {
 			return nil
 		}
-		if i == MAX_RETRIES-1 {
+		if i == maxRetries-1 {
 			return err
 		}
 		backoff := time.Duration(i+1) * time.Second
@@ -891,6 +890,7 @@ func main() {
 	flag.BoolVar(&autoRemove, "autoremove", false, "Automatically remove files from archive")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 	flag.IntVar(&maxConcurrency, "maxconcurrency", 16, "Maximum concurrency for blob operations")
+	flag.IntVar(&maxRetries, "maxretries", 3, "Maximum retries for blob operations")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	flag.Parse()
@@ -901,6 +901,11 @@ func main() {
 		}
 		logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 		slog.SetDefault(logger)
+	}
+
+	if maxRetries < 1 {
+		slog.Info("Setting max retries to 1")
+		maxRetries = 1
 	}
 
 	if showVersion {
