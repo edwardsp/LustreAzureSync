@@ -111,7 +111,7 @@ func ChangelogRecv(cl *Changelog) (*ChangelogRecord, error) {
 
 	r, err := newRecord(rec)
 
-	C.free(unsafe.Pointer(rec))
+	_ = C.llapi_changelog_free(&rec)
 
 	if err != nil {
 		return nil, err
@@ -335,15 +335,16 @@ func newRecord(cRec *C.struct_changelog_rec) (*ChangelogRecord, error) {
 	if namelen > 0 {
 		name = C.GoString(C.changelog_rec_name(cRec))
 		if namelen < len(name) {
-			//fmt.Printf("shrinking name as it is longer than namelen: '%s' -> '%s'\n", name, name[:namelen])
+			fmt.Printf("shrinking name as it is longer than namelen: '%s' -> '%s'\n", name, name[:namelen])
 			name = name[:namelen]
 		}
 	}
+
 	record := &ChangelogRecord{
-		name:      name,
+		name:      strings.Clone(name),
 		index:     int64(cRec.cr_index),
 		rType:     uint(cRec.cr_type),
-		typeName:  C.GoString(C.changelog_type2str(C.int(cRec.cr_type))),
+		typeName:  strings.Clone(C.GoString(C.changelog_type2str(C.int(cRec.cr_type)))),
 		flags:     uint(cRec.cr_flags),
 		prev:      uint(cRec.cr_prev),
 		time:      time.Unix(int64(cRec.cr_time>>30), 0), // WTF?
@@ -351,13 +352,15 @@ func newRecord(cRec *C.struct_changelog_rec) (*ChangelogRecord, error) {
 		parentFid: fromCFid(&cRec.cr_pfid),
 	}
 	if record.IsRename() {
-		snamelen := int(C.changelog_rec_snamelen(cRec))
+		snamelen := namelen - (len(name) + 1)
 		sname := ""
 		if snamelen > 0 {
 			sname = C.GoStringN(C.changelog_rec_sname(cRec), C.int(snamelen))
 		}
+
+		//println("ChangelogRecv: ", name, namelen, sname, snamelen)
 		rename := C.changelog_rec_rename(cRec)
-		record.sourceName = sname
+		record.sourceName = strings.Clone(sname)
 		record.sourceFid = fromCFid(&rename.cr_sfid)
 		record.sourceParentFid = fromCFid(&rename.cr_spfid)
 		//fmt.Printf("%s: namelen=%d, actualNameLength=%d, snamelen=%d, actualSnameLength=%d, flags=%d\n", record.typeName, namelen, len(name), snamelen, len(sname), record.flags)
@@ -368,7 +371,7 @@ func newRecord(cRec *C.struct_changelog_rec) (*ChangelogRecord, error) {
 	//}
 	if hasJobID(record) {
 		jobid := C.changelog_rec_jobid(cRec)
-		record.jobID = C.GoString(&jobid.cr_jobid[0])
+		record.jobID = strings.Clone(C.GoString(&jobid.cr_jobid[0]))
 	}
 	return record, nil
 }

@@ -525,6 +525,52 @@ func renme(rec *llapi.ChangelogRecord) {
 	}
 }
 
+func move_blob(sourcePath string, targetPath string, checkSourceExists bool) {
+	targetBlobUrl := fmt.Sprintf("%s/%s/%s", serviceUrl, containerName, targetPath)
+	targetBlobClient, err := blob.NewClient(targetBlobUrl, cred, nil)
+	if err != nil {
+		slog.Warn("Failed to get targetBlobClient", "targetBlobUrl", targetBlobUrl, "error", err)
+	}
+
+	sourceBlobUrl := fmt.Sprintf("%s/%s/%s", serviceUrl, containerName, sourcePath)
+	sourceBlobClient, err := blob.NewClient(sourceBlobUrl, cred, nil)
+	if err != nil {
+		slog.Warn("Failed to get sourceBlobClient", "sourceBlobUrl", sourceBlobUrl, "error", err)
+	}
+
+	if checkSourceExists {
+		_, err := sourceBlobClient.GetProperties(ctx, &blob.GetPropertiesOptions{})
+		if err != nil {
+			slog.Debug("Source blob does not exist", "sourceBlobUrl", sourceBlobUrl, "error", err)
+			return
+		}
+
+	}
+
+	// copy in blob (async)
+	retry(func() error {
+		_, err = targetBlobClient.StartCopyFromURL(ctx, sourceBlobClient.URL(), nil)
+		return err
+	})
+	if err != nil {
+		slog.Warn("Failed to copy blob", "sourceBlobUrl", sourceBlobUrl, "targetBlobUrl", targetBlobUrl, "error", err)
+		return
+	}
+	// wait for copy to complete
+	for {
+		props, err := targetBlobClient.GetProperties(ctx, &blob.GetPropertiesOptions{})
+		if err != nil {
+			slog.Warn("Failed to get blob properties", "targetBlobUrl", targetBlobUrl, "error", err)
+			return
+		}
+		if *props.CopyStatus == blob.CopyStatusTypeSuccess {
+			break
+		}
+	}
+
+	delete_blob(sourcePath)
+}
+
 func renme_copyblob(rec *llapi.ChangelogRecord) {
 	tname, err := getPath(rec.Name(), rec.ParentFid().String())
 	if err != nil {
@@ -536,91 +582,59 @@ func renme_copyblob(rec *llapi.ChangelogRecord) {
 		slog.Warn("Failed to get path", "error", err)
 		return
 	}
+	slog.Info("Renaming", "idx", rec.Index(), "source", sname, "target", tname)
 	if tname == sname {
-		slog.Warn("Source and target have the same name", "source", "sname", "target", tname)
+		slog.Warn("Source and target have the same name", "source", sname, "target", tname)
 		return
 	}
 
-	slog.Info("Renaming", "idx", rec.Index(), "source", sname, "target", tname)
-	semaphore := make(chan struct{}, maxConcurrency)
-	var wg sync.WaitGroup
-	// walk filesystem and move files in blob storage
-	slog.Info("Walking filesystem", "path", mountRoot+"/"+tname)
-	cnt := 0
-	filepath.Walk(mountRoot+"/"+tname, func(path string, fileInfo os.FileInfo, err error) error {
-		cnt++
-		if cnt%10000 == 0 {
-			slog.Info("Walking filesystem", "count", cnt)
-		}
-		if err != nil {
-			return err
-		}
+	_, isDir := dirLookup[rec.SourceFid().String()]
 
-		wg.Add(1)
-		semaphore <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-semaphore }()
-			targetPath := strings.TrimPrefix(path, mountRoot+"/")
-			sourcePath := strings.Replace(targetPath, tname, sname, 1)
+	if !isDir {
+		move_blob(sname, tname, true)
+	} else {
+		semaphore := make(chan struct{}, maxConcurrency)
+		var wg sync.WaitGroup
 
-			if fileInfo.IsDir() {
-				create_dir(targetPath)
-				delete_blob(sourcePath)
-				return
-			}
-			if fileInfo.Mode()&os.ModeSymlink != 0 {
-				create_symlink(targetPath)
-				delete_blob(sourcePath)
-				return
-			}
-
-			targetBlobUrl := fmt.Sprintf("%s/%s/%s", serviceUrl, containerName, targetPath)
-			targetBlobClient, err := blob.NewClient(targetBlobUrl, cred, nil)
+		slog.Info("Moving archived files in BLOB storage")
+		move_blob(sname, tname, false)
+		dirprefix := sname + "/"
+		counter := 0
+		pager := client.NewListBlobsFlatPager(containerName, &azblob.ListBlobsFlatOptions{
+			Include: container.ListBlobsInclude{Deleted: false, Metadata: true, Versions: false},
+			Prefix:  &dirprefix,
+		})
+		for pager.More() {
+			resp, err := pager.NextPage(ctx)
 			if err != nil {
-				slog.Warn("Failed to get targetBlobClient", "targetBlobUrl", targetBlobUrl, "error", err)
+				slog.Warn("Error getting next page", "error", err)
+				break
 			}
-
-			sourceBlobUrl := fmt.Sprintf("%s/%s/%s", serviceUrl, containerName, sourcePath)
-			sourceBlobClient, err := blob.NewClient(sourceBlobUrl, cred, nil)
-			if err != nil {
-				slog.Warn("Failed to get sourceBlobClient", "sourceBlobUrl", sourceBlobUrl, "error", err)
-			}
-
-			state, _, err := llapi.GetHsmFileStatus(path)
-			if err != nil {
-				slog.Warn("Failed to get HSM file status", "path", path, "error", err)
-				return
-			}
-			if state.HasFlag(llapi.HsmFileReleased) || state.HasFlag(llapi.HsmFileDirty) || state.HasFlag(llapi.HsmFileArchived) {
-				// copy in blob (async)
-				retry(func() error {
-					_, err = targetBlobClient.StartCopyFromURL(ctx, sourceBlobClient.URL(), nil)
-					return err
-				})
-				if err != nil {
-					slog.Warn("Failed to copy blob", "sourceBlobUrl", sourceBlobUrl, "targetBlobUrl", targetBlobUrl, "error", err)
-					return
-				}
-				// wait for copy to complete
-				for {
-					props, err := targetBlobClient.GetProperties(ctx, &blob.GetPropertiesOptions{})
-					if err != nil {
-						slog.Warn("Failed to get blob properties", "targetBlobUrl", targetBlobUrl, "error", err)
-						return
-					}
-					if *props.CopyStatus == blob.CopyStatusTypeSuccess {
-						break
-					}
+			for _, blobItem := range resp.Segment.BlobItems {
+				counter++
+				if counter%10000 == 0 {
+					slog.Info("Moving archived files in BLOB storage", "count", counter)
 				}
 
-				delete_blob(sourcePath)
+				sourcePath := *blobItem.Name
+				targetPath := strings.Replace(sourcePath, sname, tname, 1)
+				slog.Info("Moving archived file in BLOB storage", "sourcePath", sourcePath, "targetPath", targetPath)
+
+				wg.Add(1)
+				semaphore <- struct{}{}
+
+				go func() {
+					defer wg.Done()
+					defer func() { <-semaphore }()
+					move_blob(sourcePath, targetPath, false)
+				}() // go func
 			}
-		}() // go func
-		return nil
-	})
-	wg.Wait()
-	close(semaphore)
+		}
+		slog.Info("Moved all archived files from BLOB storage", "count", counter)
+		wg.Wait()
+		close(semaphore)
+	}
+
 	slog.Info("Move complete")
 
 	// if sfid is in dirLookup change the name (i.e. it is directory)
