@@ -195,7 +195,7 @@ func set_metadata(name string) {
 func slink(rec *llapi.ChangelogRecord) {
 	tname, err := getPath(rec.Name(), rec.ParentFid().String())
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("slink: Failed to get path", "name", rec.Name(), "error", err)
 		return
 	}
 	symlinkLookup[rec.TargetFid().String()] = lfsent{rec.Name(), rec.ParentFid().String()}
@@ -210,7 +210,7 @@ func unlnk(rec *llapi.ChangelogRecord) {
 	if _, ok := symlinkLookup[rec.TargetFid().String()]; ok {
 		tname, err := getPath(rec.Name(), rec.ParentFid().String())
 		if err != nil {
-			slog.Warn("Failed to get path", "error", err)
+			slog.Warn("unlnk: Failed to get path", "name", rec.Name(), "error", err)
 			return
 		}
 
@@ -227,7 +227,7 @@ func unlnk(rec *llapi.ChangelogRecord) {
 		if autoRemove == true {
 			tname, err := getPath(rec.Name(), rec.ParentFid().String())
 			if err != nil {
-				slog.Warn("Failed to get path", "error", err)
+				slog.Warn("unlnk: Failed to get path", "name", rec.Name(), "error", err)
 				return
 			}
 
@@ -270,7 +270,7 @@ func mkdir(rec *llapi.ChangelogRecord) {
 	//tname, _ := llapi.Fid2Path(mdtname, rec.TargetFid(), &recno, &linkno)
 	tname, err := getPath(rec.Name(), rec.ParentFid().String())
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("mkdir: Failed to get path", "name", rec.Name(), "error", err)
 		return
 	}
 
@@ -288,7 +288,7 @@ func mkdir(rec *llapi.ChangelogRecord) {
 func rmdir(rec *llapi.ChangelogRecord) {
 	tname, err := getPath(rec.Name(), rec.ParentFid().String())
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("rmdir: Failed to get target path", "name", rec.Name(), "error", err)
 		return
 	}
 
@@ -370,12 +370,12 @@ func renme_adls(rec *llapi.ChangelogRecord) error {
 func renme(rec *llapi.ChangelogRecord) {
 	tname, err := getPath(rec.Name(), rec.ParentFid().String())
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("renme: Failed to get target path", "tname", rec.Name(), "error", err)
 		return
 	}
 	sname, err := getPath(rec.SourceName(), rec.SourceParentFid().String())
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("renme: Failed to get source path", "sname", rec.SourceName(), "error", err)
 		return
 	}
 
@@ -573,12 +573,12 @@ func move_blob(sourcePath string, targetPath string, checkSourceExists bool) {
 func renme_copyblob(rec *llapi.ChangelogRecord) {
 	tname, err := getPath(rec.Name(), rec.ParentFid().String())
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("renme_copyblob: Failed to get target path", "name", rec.Name(), "source", rec.SourceName(), "error", err)
 		return
 	}
 	sname, err := getPath(rec.SourceName(), rec.SourceParentFid().String())
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("renme_copyblob: Failed to get source path", "name", rec.Name(), "source", rec.SourceName(), "error", err)
 		return
 	}
 	slog.Info("Renaming", "idx", rec.Index(), "source", sname, "target", tname)
@@ -665,7 +665,7 @@ func update_layout(rec *llapi.ChangelogRecord) {
 	linkno := 0
 	target_name, err := llapi.Fid2Path(mountRoot, tfid, &recno, &linkno)
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("update_layout: Failed to get path", "name", rec.Name(), "error", err)
 		return
 	}
 
@@ -686,7 +686,7 @@ func update_metadata(rec *llapi.ChangelogRecord) {
 	linkno := 0
 	target_name, err := llapi.Fid2Path(mountRoot, tfid, &recno, &linkno)
 	if err != nil {
-		slog.Warn("Failed to get path", "error", err)
+		slog.Warn("update_metadata: Failed to get path", "name", rec.Name(), "error", err)
 		return
 	}
 
