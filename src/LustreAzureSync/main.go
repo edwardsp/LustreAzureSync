@@ -686,6 +686,10 @@ func update_metadata(rec *llapi.ChangelogRecord) {
 	linkno := 0
 	target_name, err := llapi.Fid2Path(mountRoot, tfid, &recno, &linkno)
 	if err != nil {
+		if rec.Name() == "" {
+			// this can happen when the file is deleted before we get to it
+			return
+		}
 		slog.Warn("update_metadata: Failed to get path", "name", rec.Name(), "error", err)
 		return
 	}
