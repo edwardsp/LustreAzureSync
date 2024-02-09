@@ -562,8 +562,25 @@ func move_blob(sourcePath string, targetPath string, checkSourceExists bool) {
 			slog.Warn("Failed to get blob properties", "targetBlobUrl", targetBlobUrl, "error", err)
 			return
 		}
+		if props.CopyStatus == nil {
+			slog.Warn("CopyStatus is nil on the blob properties, retrying after 1 second", "targetBlobUrl", targetBlobUrl)
+			time.Sleep(time.Second)
+			continue
+		}
+		if *props.CopyStatus == blob.CopyStatusTypePending {
+			time.Sleep(time.Second)
+			continue
+		}
 		if *props.CopyStatus == blob.CopyStatusTypeSuccess {
 			break
+		}
+		if *props.CopyStatus == blob.CopyStatusTypeFailed {
+			slog.Warn("Copy failed", "targetBlobUrl", targetBlobUrl)
+			return
+		}
+		if *props.CopyStatus == blob.CopyStatusTypeAborted {
+			slog.Warn("Copy aborted", "targetBlobUrl", targetBlobUrl)
+			return
 		}
 	}
 
