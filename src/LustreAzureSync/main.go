@@ -741,6 +741,7 @@ func update_metadata(rec *llapi.ChangelogRecord) {
 }
 
 // walk the filesystem and put all paths into a map
+// NOTE: all errors are written to the error log but the walk will continue
 func walk_filesystem(root string) (dirFidToPath map[string]lfsent, symlinkFidToPath map[string]lfsent) {
 	dirFidToPath = make(map[string]lfsent)
 	symlinkFidToPath = make(map[string]lfsent)
@@ -748,12 +749,19 @@ func walk_filesystem(root string) (dirFidToPath map[string]lfsent, symlinkFidToP
 	nSymlinks := 0
 	nDirectories := 0
 	filepath.Walk(root, func(path string, fileInfo os.FileInfo, err error) error {
+		// Log errors and continue rather than stopping entirely.
+		if err != nil {
+			slog.Error("Error accessing path", "path", path, "error", err)
+			return nil
+		}
+		// Additional check to ensure fileInfo is non-nil
+		if fileInfo == nil {
+			slog.Error("Nil fileInfo encountered", "path", path)
+			return nil
+		}
 		nEntries++
 		if nEntries%10000 == 0 {
 			slog.Info("Walking filesystem", "total_entries", nEntries, "total_dirs", nDirectories, "total_symlinks", nSymlinks)
-		}
-		if err != nil {
-			return err
 		}
 		isDir := fileInfo.IsDir()
 		isSymlink := fileInfo.Mode()&os.ModeSymlink != 0
@@ -769,7 +777,7 @@ func walk_filesystem(root string) (dirFidToPath map[string]lfsent, symlinkFidToP
 			fid = f.String()
 		} else {
 			slog.Error("failed to get fid", "path", path, "error", err)
-			os.Exit(1)
+			return nil  // Continue walking rather than exiting
 		}
 		if path != root {
 			f, err := llapi.Path2Fid(parent)
@@ -777,7 +785,7 @@ func walk_filesystem(root string) (dirFidToPath map[string]lfsent, symlinkFidToP
 				pfid = f.String()
 			} else {
 				slog.Error("failed to get fid", "parent", parent, "error", err)
-				os.Exit(1)
+				return nil  // Continue walking rather than exiting
 			}
 		}
 		//fmt.Printf("%s : %s %s [%s]\n", fid, name, parent, path)
