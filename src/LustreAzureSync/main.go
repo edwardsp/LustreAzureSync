@@ -9,6 +9,7 @@ import (
 
 	//"log"
 	"log/slog"
+
 	//"net/http"
 	"os"
 	"path"
@@ -25,7 +26,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/directory"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 
-	"github.com/edwardsp/LustreAzureSync/src/go-lustre"
 	"github.com/edwardsp/LustreAzureSync/src/go-lustre/llapi"
 	//_ "net/http/pprof"
 )
@@ -302,6 +302,30 @@ func rmdir(rec *llapi.ChangelogRecord) {
 	delete_blob(tname)
 }
 
+func update_dirLookup(rec *llapi.ChangelogRecord) {
+	if _, ok := dirLookup[rec.SourceFid().String()]; ok {
+		sfid := rec.SourceFid()
+		ent := dirLookup[sfid.String()]
+		ent.name = rec.Name()
+		ent.parent = rec.ParentFid().String()
+		dirLookup[sfid.String()] = ent
+
+		//fmt.Printf("sfid=%s name=%s parent=%s\n", sfid, dirLookup[sfid.String()], dirLookup[dirLookup[sfid.String()].parent])
+	}
+}
+
+func update_symlinkLookup(rec *llapi.ChangelogRecord) {
+	// if sfid is in symlinkLookup change the name (i.e. it is symlink)
+	if _, ok := symlinkLookup[rec.SourceFid().String()]; ok {
+		sfid := rec.SourceFid()
+		ent := symlinkLookup[sfid.String()]
+		ent.name = rec.Name()
+		ent.parent = rec.ParentFid().String()
+		symlinkLookup[sfid.String()] = ent
+		//fmt.Printf("sfid=%s name=%s parent=%s\n", sfid, dirLookup[sfid.String()], dirLookup[dirLookup[sfid.String()].parent])
+	}
+}
+
 func renme_adls(rec *llapi.ChangelogRecord) error {
 	tname, err := getPath(rec.Name(), rec.ParentFid().String())
 	if err != nil {
@@ -326,6 +350,7 @@ func renme_adls(rec *llapi.ChangelogRecord) error {
 		if err != nil {
 			return errors.New("Unable to rename directory")
 		}
+
 	} else {
 		client, err := file.NewClient(path, cred, nil)
 		if err != nil {
@@ -336,192 +361,11 @@ func renme_adls(rec *llapi.ChangelogRecord) error {
 			return errors.New("Unable to rename file")
 		}
 	}
+
+	update_dirLookup(rec)
+	update_symlinkLookup(rec)
+
 	return nil
-}
-
-// Renaming a directory
-//
-// Everything needs to be on the Lustre filesystem so restore any archived files
-// Mark all files under the target path as dirty
-//
-// Traverse path:
-//   - Delete all files (creating the blank file with the "deleted=true" metadata)
-//   - Add directories in new path
-//
-// -- Example Changelog Record --
-// Index=228669
-// JobID=
-// Name=ppp3
-// ParentFid=[0x200000007:0x1:0x0]
-// SourceFid=[0x200000401:0x13006:0x0]
-// SourceName=ppp2
-// SourceParentFid=[0x200000007:0x1:0x0]
-// String=228669 08RENME 2021-08-19 11:07:31 +0000 UTC 0x0  [0x200000007:0x1:0x0]/[0x200000401:0x13006:0x0]->[0x200000007:0x1:0x0]/[0x0:0x0:0x0] ppp2->ppp3
-// TargetFid=[0x0:0x0:0x0]
-// Time=2021-08-19 11:07:31 +0000 UTC
-// Type=RENME
-// TypeCode=
-//
-// Future optimisation is to move the files in BLOB storage
-//   - https://docs.microsoft.com/en-us/rest/api/storageservices/put-blob-from-url
-//   - If the file size is larger than 256MB then it must be restored if in archive
-// and then marked as dirty.
-
-func renme(rec *llapi.ChangelogRecord) {
-	tname, err := getPath(rec.Name(), rec.ParentFid().String())
-	if err != nil {
-		slog.Warn("renme: Failed to get target path", "tname", rec.Name(), "error", err)
-		return
-	}
-	sname, err := getPath(rec.SourceName(), rec.SourceParentFid().String())
-	if err != nil {
-		slog.Warn("renme: Failed to get source path", "sname", rec.SourceName(), "error", err)
-		return
-	}
-
-	if tname == sname {
-		slog.Warn("Source and target have the same name", "source", "sname", "target", tname)
-		return
-	}
-
-	// HSM updates
-	var releasedFiles []string
-	slog.Info("Walking filesystem", "path", mountRoot+"/"+tname)
-	filepath.Walk(mountRoot+"/"+tname, func(path string, fileInfo os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if fileInfo.IsDir() {
-			return nil
-		}
-		state, fileArchiveId, err := llapi.GetHsmFileStatus(path)
-		if err != nil {
-			return err
-		}
-		if state.HasFlag(llapi.HsmFileReleased) {
-			slog.Info("File in RELEASED state, need to restore and set as DIRTY", "path", fileInfo.Name())
-			f, err := llapi.Path2Fid(path)
-			if err == nil {
-				fids := []*lustre.Fid{f}
-				llapi.HsmRequest("", llapi.HsmUserRestore, archiveId, fids)
-				releasedFiles = append(releasedFiles, path)
-			} else {
-				slog.Warn("Failed to get fid", "path", path)
-			}
-		} else if state.HasFlag(llapi.HsmFileDirty) {
-			slog.Info("File in DIRTY state for archive, ignoring", "path", fileInfo.Name())
-		} else if state.HasFlag(llapi.HsmFileArchived) {
-			if archiveId != uint(fileArchiveId) {
-				slog.Error("Archive ID mismatch detected (multiple archives are not supported)", "path", path, "archiveId", archiveId, "fileArchiveId", fileArchiveId)
-			}
-			slog.Info("File in ARCHIVE state, setting to DIRTY", "path", fileInfo.Name())
-			llapi.SetHsmFileStatus(path, uint64(llapi.HsmFileDirty), 0, uint32(archiveId))
-		}
-		return nil
-	})
-	// wait for all released file to be restored and set to dirty
-	if len(releasedFiles) > 0 {
-		slog.Info("Waiting for released files to be restored", "count", len(releasedFiles))
-	}
-	for len(releasedFiles) > 0 {
-		var remainingFiles []string
-
-		for _, path := range releasedFiles {
-			state, _, err := llapi.GetHsmFileStatus(path)
-			if err != nil {
-				slog.Warn("Failed to get HSM file status", "path", path, "error", err)
-				continue
-			}
-			if state.HasFlag(llapi.HsmFileReleased) {
-				remainingFiles = append(remainingFiles, path)
-			} else {
-				slog.Info("File has been restored, setting to DIRTY", "path", path)
-				llapi.SetHsmFileStatus(path, uint64(llapi.HsmFileDirty), 0, uint32(archiveId))
-			}
-		}
-
-		if len(remainingFiles) > 0 {
-			slog.Info("Files still remaining", "count", len(remainingFiles))
-			// sleep 5 seconds...
-			time.Sleep(time.Second * 5)
-		}
-
-		releasedFiles = remainingFiles
-	}
-
-	if usingHns == true {
-		// Delete the source files from BLOB storage
-		slog.Info("Generating list of source files from BLOB storage", "path", sname)
-		//create a string list called blobs
-		blobs := []string{}
-		pager := client.NewListBlobsFlatPager(containerName, &azblob.ListBlobsFlatOptions{
-			Include: container.ListBlobsInclude{Deleted: false, Metadata: true, Versions: false},
-			Prefix:  &sname,
-		})
-		for pager.More() {
-			resp, err := pager.NextPage(ctx)
-			if err != nil {
-				fmt.Printf("Error getting next page [%s]\n", err)
-				break
-			}
-			for _, blob := range resp.Segment.BlobItems {
-				//delete_blob(*blob.Name)
-				blobs = append(blobs, *blob.Name)
-			}
-		}
-		slog.Info("Deleting source files from BLOB storage", "count", len(blobs))
-		for i := len(blobs) - 1; i >= 0; i-- {
-			delete_blob(blobs[i])
-		}
-	} else {
-		slog.Info("Finding and deleting source files from BLOB storage")
-		counter := 0
-		pager := client.NewListBlobsFlatPager(containerName, &azblob.ListBlobsFlatOptions{
-			Include: container.ListBlobsInclude{Deleted: false, Metadata: true, Versions: false},
-			Prefix:  &sname,
-		})
-		for pager.More() {
-			resp, err := pager.NextPage(ctx)
-			if err != nil {
-				fmt.Printf("Error getting next page [%s]\n", err)
-				break
-			}
-			for _, blob := range resp.Segment.BlobItems {
-				delete_blob(*blob.Name)
-				counter++
-			}
-		}
-		slog.Info("Deleted all source files from BLOB storage", "count", counter)
-	}
-
-	// Create the target directories/symlinks in BLOB storage
-	slog.Info("Creating the target directories/symlinks in BLOB storage", "path", tname)
-	filepath.Walk(mountRoot+"/"+tname, func(path string, fileInfo os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if fileInfo.IsDir() {
-			name := strings.TrimPrefix(path, mountRoot+"/")
-			create_dir(name)
-			return nil
-		}
-		if fileInfo.Mode()&os.ModeSymlink != 0 {
-			name := strings.TrimPrefix(path, mountRoot+"/")
-			create_symlink(name)
-			return nil
-		}
-		return nil
-	})
-
-	// if sfid is in dirLookup change the name (i.e. it is directory)
-	if _, ok := dirLookup[rec.SourceFid().String()]; ok {
-		sfid := rec.SourceFid()
-		ent := dirLookup[sfid.String()]
-		ent.name = rec.Name()
-		ent.parent = rec.ParentFid().String()
-		dirLookup[sfid.String()] = ent
-		//fmt.Printf("sfid=%s name=%s parent=%s\n", sfid, dirLookup[sfid.String()], dirLookup[dirLookup[sfid.String()].parent])
-	}
 }
 
 func move_blob(sourcePath string, targetPath string, checkSourceExists bool) {
@@ -653,25 +497,9 @@ func renme_copyblob(rec *llapi.ChangelogRecord) {
 
 	slog.Info("Move complete")
 
-	// if sfid is in dirLookup change the name (i.e. it is directory)
-	if _, ok := dirLookup[rec.SourceFid().String()]; ok {
-		sfid := rec.SourceFid()
-		ent := dirLookup[sfid.String()]
-		ent.name = rec.Name()
-		ent.parent = rec.ParentFid().String()
-		dirLookup[sfid.String()] = ent
-		//fmt.Printf("sfid=%s name=%s parent=%s\n", sfid, dirLookup[sfid.String()], dirLookup[dirLookup[sfid.String()].parent])
-	}
+	update_dirLookup(rec)
+	update_symlinkLookup(rec)
 
-	// if sfid is in symlinkLookup change the name (i.e. it is symlink)
-	if _, ok := symlinkLookup[rec.SourceFid().String()]; ok {
-		sfid := rec.SourceFid()
-		ent := symlinkLookup[sfid.String()]
-		ent.name = rec.Name()
-		ent.parent = rec.ParentFid().String()
-		symlinkLookup[sfid.String()] = ent
-		//fmt.Printf("sfid=%s name=%s parent=%s\n", sfid, dirLookup[sfid.String()], dirLookup[dirLookup[sfid.String()].parent])
-	}
 }
 
 // we only need to update the layout for a directory
@@ -777,7 +605,7 @@ func walk_filesystem(root string) (dirFidToPath map[string]lfsent, symlinkFidToP
 			fid = f.String()
 		} else {
 			slog.Error("failed to get fid", "path", path, "error", err)
-			return nil  // Continue walking rather than exiting
+			return nil // Continue walking rather than exiting
 		}
 		if path != root {
 			f, err := llapi.Path2Fid(parent)
@@ -785,7 +613,7 @@ func walk_filesystem(root string) (dirFidToPath map[string]lfsent, symlinkFidToP
 				pfid = f.String()
 			} else {
 				slog.Error("failed to get fid", "parent", parent, "error", err)
-				return nil  // Continue walking rather than exiting
+				return nil // Continue walking rather than exiting
 			}
 		}
 		//fmt.Printf("%s : %s %s [%s]\n", fid, name, parent, path)
