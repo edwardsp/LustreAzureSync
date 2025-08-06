@@ -5,12 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"sync"
 
-	//"log"
 	"log/slog"
 
-	//"net/http"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,7 +26,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azdatalake/file"
 
 	"github.com/edwardsp/LustreAzureSync/src/go-lustre/llapi"
-	//_ "net/http/pprof"
 )
 
 var mountRoot string
@@ -51,8 +49,8 @@ type lfsent struct {
 	parent string
 }
 
-var dirLookup map[string]lfsent
-var symlinkLookup map[string]lfsent
+var dirLookup = make(map[string]lfsent)
+var symlinkLookup = make(map[string]lfsent)
 
 func getPath(name string, fid string) (string, error) {
 	path := name
@@ -568,66 +566,99 @@ func update_metadata(rec *llapi.ChangelogRecord) {
 	}
 }
 
+func create_file_dict(path string, root string, isDir bool, isSymlink bool) (map[string]string, error) {
+	fileDict := make(map[string]string)
+	fileDict["isDir"] = fmt.Sprintf("%t", isDir)
+	fileDict["isSymlink"] = fmt.Sprintf("%t", isSymlink)
+	fileDict["name"] = filepath.Base(path)
+	fileDict["parent"] = filepath.Dir(path)
+
+	f, err := llapi.Path2Fid(path)
+	var fid string
+	var pfid string = ""
+
+	if err == nil {
+		fid = f.String()
+	} else {
+		slog.Error("failed to get fid", "path", path, "error", err)
+		return fileDict, err
+	}
+
+	if path != root {
+		f, err := llapi.Path2Fid(fileDict["parent"])
+		if err == nil {
+			pfid = f.String()
+		} else {
+			slog.Error("failed to get fid", "parent", fileDict["parent"], "error", err)
+			return fileDict, err
+		}
+	}
+	fileDict["fid"] = fid
+	fileDict["parentFid"] = pfid
+
+	return fileDict, nil
+}
+
 // walk the filesystem and put all paths into a map
 // NOTE: all errors are written to the error log but the walk will continue
-func walk_filesystem(root string) (dirFidToPath map[string]lfsent, symlinkFidToPath map[string]lfsent) {
-	dirFidToPath = make(map[string]lfsent)
-	symlinkFidToPath = make(map[string]lfsent)
+func walk_filesystem(root string, messages chan map[string]string) {
+
 	nEntries := 0
 	nSymlinks := 0
 	nDirectories := 0
-	filepath.Walk(root, func(path string, fileInfo os.FileInfo, err error) error {
-		// Log errors and continue rather than stopping entirely.
-		if err != nil {
-			slog.Error("Error accessing path", "path", path, "error", err)
-			return nil
-		}
-		// Additional check to ensure fileInfo is non-nil
-		if fileInfo == nil {
-			slog.Error("Nil fileInfo encountered", "path", path)
-			return nil
-		}
-		nEntries++
-		if nEntries%10000 == 0 {
-			slog.Info("Walking filesystem", "total_entries", nEntries, "total_dirs", nDirectories, "total_symlinks", nSymlinks)
-		}
-		isDir := fileInfo.IsDir()
-		isSymlink := fileInfo.Mode()&os.ModeSymlink != 0
-		if !(isDir || isSymlink) {
-			return nil
-		}
-		name := filepath.Base(path)
-		parent := filepath.Dir(path)
-		var fid string
-		var pfid string = ""
-		f, err := llapi.Path2Fid(path)
-		if err == nil {
-			fid = f.String()
-		} else {
-			slog.Error("failed to get fid", "path", path, "error", err)
-			return nil // Continue walking rather than exiting
-		}
-		if path != root {
-			f, err := llapi.Path2Fid(parent)
-			if err == nil {
-				pfid = f.String()
-			} else {
-				slog.Error("failed to get fid", "parent", parent, "error", err)
-				return nil // Continue walking rather than exiting
+
+	sem := make(chan struct{}, 64)
+	var wg sync.WaitGroup
+
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(path string, d fs.DirEntry) error {
+			defer wg.Done()
+			defer func() { <-sem }() // Release the semaphore slot
+			var fileDict map[string]string
+
+			info, err := os.Lstat(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "stat error for %q: %v\n", path, err)
+				return nil
 			}
-		}
-		//fmt.Printf("%s : %s %s [%s]\n", fid, name, parent, path)
-		if isDir {
-			nDirectories++
-			dirFidToPath[fid] = lfsent{name, pfid}
-		} else {
-			nSymlinks++
-			symlinkFidToPath[fid] = lfsent{name, pfid}
-		}
+
+			// Log errors and continue rather than stopping entirely.
+			if err != nil {
+				slog.Error("Error accessing path", "path", path, "error", err)
+				return nil
+			}
+
+			nEntries++
+			if nEntries%10000 == 0 {
+				slog.Info("Walking filesystem", "total_entries", nEntries, "total_dirs", nDirectories, "total_symlinks", nSymlinks)
+			}
+
+			if d.IsDir() {
+				nDirectories++
+				fileDict, err = create_file_dict(path, root, true, false)
+			} else if info.Mode()&os.ModeSymlink != 0 {
+				nSymlinks++
+				fileDict, err = create_file_dict(path, root, false, true)
+			}
+
+			if err == nil {
+				messages <- fileDict
+			} else {
+				slog.Warn("Failed to create file dict for ", "path", path)
+			}
+
+			return nil
+		}(path, d)
 
 		return nil
 	})
-	return dirFidToPath, symlinkFidToPath
+
+	wg.Wait()
+	close(messages)
+
 }
 
 func pretty_print_changelog_record(rec *llapi.ChangelogRecord) {
@@ -818,7 +849,27 @@ func main() {
 	}
 
 	slog.Info("Initialising")
-	dirLookup, symlinkLookup = walk_filesystem(mountRoot)
+
+	messages := make(chan map[string]string)
+	startTime := time.Now()
+	go func() { walk_filesystem(mountRoot, messages) }()
+	for {
+		j, more := <-messages
+		if more {
+			if j["isDir"] == "true" {
+				dirLookup[j["fid"]] = lfsent{j["name"], j["parentFid"]}
+			} else {
+				symlinkLookup[j["fid"]] = lfsent{j["name"], j["parentFid"]}
+			}
+
+		} else {
+			fmt.Println("Processed all files")
+			break
+		}
+	}
+	stopTime := time.Now()
+	slog.Info("Finished walking filesystem", "duration", stopTime.Sub(startTime))
+
 	slog.Info("Ready - starting changelog processing")
 	process_changelog(mdtname, userid)
 }
